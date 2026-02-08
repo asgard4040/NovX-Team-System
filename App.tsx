@@ -105,8 +105,10 @@ const App: React.FC = () => {
     try {
       await api.agents.create(agent);
       await loadAllData();
-    } catch (error) {
+      alert("تمت إضافة المندوب بنجاح.");
+    } catch (error: any) {
       console.error("Failed to create agent:", error);
+      alert(`فشل في إضافة المندوب: ${error.message || 'خطأ في قاعدة البيانات'}. تأكد من إنشاء الجداول في Supabase.`);
     } finally {
       setIsLoading(false);
     }
@@ -117,8 +119,8 @@ const App: React.FC = () => {
     try {
       await api.agents.update(id, updates);
       await loadAllData();
-    } catch (error) {
-      console.error("Failed to update agent:", error);
+    } catch (error: any) {
+      alert(`فشل التحديث: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -129,8 +131,8 @@ const App: React.FC = () => {
     try {
       await api.admins.create(admin);
       await loadAllData();
-    } catch (error) {
-      console.error("Failed to create admin:", error);
+    } catch (error: any) {
+      alert(`فشل إضافة المسؤول: ${error.message}`);
     } finally {
       setIsLoading(false);
     }
@@ -141,8 +143,8 @@ const App: React.FC = () => {
     try {
       await api.admins.update(id, updates);
       await loadAllData();
-    } catch (error) {
-      console.error("Failed to update admin:", error);
+    } catch (error: any) {
+      alert(`فشل التحديث: ${error.message}`);
     } finally {
       setIsLoading(false);
     }

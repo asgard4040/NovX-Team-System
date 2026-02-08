@@ -1,298 +1,347 @@
 
 import { GoogleGenAI } from "@google/genai";
+import { createClient } from "@supabase/supabase-js";
 import { User, SalesRequest, Institution, RequestStatus, UserRole, SystemProduct, Notification } from "../types";
-import { AGENTS_DB } from "../agents.db";
-import { ADMINS_DB } from "../admins.db";
-import { REQUESTS_DB } from "../requests.db";
-import { INSTITUTIONS_DB } from "../institutions.db";
-import { SYSTEMS_DB } from "../systems.db";
 
-const STORAGE_KEYS = {
-  AGENTS: 'mandoubi_agents',
-  ADMINS: 'mandoubi_admins',
-  REQUESTS: 'mandoubi_requests',
-  INSTITUTIONS: 'mandoubi_institutions',
-  SYSTEMS: 'mandoubi_systems',
-  NOTIFICATIONS: 'mandoubi_notifications',
-  SESSION: 'mandoubi_session'
-};
+// تحديث المفاتيح للرابط الجديد الخاص بك
+const SUPABASE_URL = 'https://vjzopotnxnqccgpvahdi.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_kEIfBM8eQJqxU401V9xGLw_S81HoYQr';
 
-const seedData = () => {
-  const checkAndSeed = (key: string, defaultData: any) => {
-    // تم الإصلاح: لا نقوم بالمسح إذا كانت البيانات موجودة مسبقاً
-    if (!localStorage.getItem(key)) {
-      localStorage.setItem(key, JSON.stringify(defaultData));
-    }
-  };
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-  checkAndSeed(STORAGE_KEYS.AGENTS, AGENTS_DB);
-  checkAndSeed(STORAGE_KEYS.ADMINS, ADMINS_DB);
-  checkAndSeed(STORAGE_KEYS.REQUESTS, REQUESTS_DB);
-  checkAndSeed(STORAGE_KEYS.INSTITUTIONS, INSTITUTIONS_DB);
-  checkAndSeed(STORAGE_KEYS.SYSTEMS, SYSTEMS_DB);
-  checkAndSeed(STORAGE_KEYS.NOTIFICATIONS, []);
-};
-
-seedData();
+const SESSION_KEY = 'mandoubi_session';
 
 export const api = {
   auth: {
     login: async (username: string, password: string, roleType: 'AGENT' | 'ADMIN'): Promise<User | null> => {
-      await new Promise(r => setTimeout(r, 600)); 
-      const key = roleType === 'AGENT' ? STORAGE_KEYS.AGENTS : STORAGE_KEYS.ADMINS;
-      const users: User[] = JSON.parse(localStorage.getItem(key) || '[]');
-      
-      const user = users.find(u => u.username === username && u.password === password);
-      
-      if (user) {
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('username', username)
+          .eq('password', password)
+          .single();
+
+        if (error || !data) return null;
+        
+        const user = data as User;
         if (user.status === 'SUSPENDED') {
           throw new Error("ACCOUNT_SUSPENDED");
         }
-        localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(user));
+        
+        localStorage.setItem(SESSION_KEY, JSON.stringify(user));
         return user;
+      } catch (err) {
+        console.error("Login Error:", err);
+        throw err;
       }
-      return null;
     },
     logout: () => {
-      localStorage.removeItem(STORAGE_KEYS.SESSION);
+      localStorage.removeItem(SESSION_KEY);
     },
     getCurrentUser: (): User | null => {
-      const session = localStorage.getItem(STORAGE_KEYS.SESSION);
+      const session = localStorage.getItem(SESSION_KEY);
       return session ? JSON.parse(session) : null;
     },
     updateProfile: async (id: string, updates: Partial<User>): Promise<User> => {
-      const session = localStorage.getItem(STORAGE_KEYS.SESSION);
-      if (!session) throw new Error("UNAUTHORIZED");
+      const { data, error } = await supabase
+        .from('users')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) throw error;
       
-      const currentUser: User = JSON.parse(session);
-      const isAgent = currentUser.role === UserRole.AGENT;
-      const key = isAgent ? STORAGE_KEYS.AGENTS : STORAGE_KEYS.ADMINS;
-      
-      const users: User[] = JSON.parse(localStorage.getItem(key) || '[]');
-      const updatedUsers = users.map(u => {
-        if (u.id === id) {
-          const updated = { ...u, ...updates };
-          if (currentUser.id === id) {
-            localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(updated));
-          }
-          return updated;
+      const session = localStorage.getItem(SESSION_KEY);
+      if (session) {
+        const currentUser = JSON.parse(session);
+        if (currentUser.id === id) {
+          localStorage.setItem(SESSION_KEY, JSON.stringify(data));
         }
-        return u;
-      });
-      
-      localStorage.setItem(key, JSON.stringify(updatedUsers));
-      return updatedUsers.find(u => u.id === id)!;
+      }
+      return data as User;
     }
   },
 
   requests: {
     getAll: async (): Promise<SalesRequest[]> => {
-      return JSON.parse(localStorage.getItem(STORAGE_KEYS.REQUESTS) || '[]');
+      const { data, error } = await supabase
+        .from('requests')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (error) return [];
+      return data.map(item => ({
+        ...item,
+        agentId: item.agent_id,
+        agentName: item.agent_name,
+        institutionName: item.institution_name,
+        systemId: item.system_id,
+        systemName: item.system_name,
+        subscriptionType: item.subscription_type,
+        contactName: item.contact_name,
+        contactPhone: item.contact_phone,
+        rejectionReason: item.rejection_reason,
+        adminNote: item.admin_note,
+        createdAt: item.created_at,
+        updatedAt: item.updated_at
+      })) as SalesRequest[];
     },
     create: async (request: Omit<SalesRequest, 'id' | 'createdAt' | 'updatedAt'>): Promise<SalesRequest> => {
-      const agents: User[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.AGENTS) || '[]');
-      const agent = agents.find(a => a.id === request.agentId);
-      
-      if (agent && agent.status === 'SUSPENDED') {
-        throw new Error("AGENT_SUSPENDED_ACTION_BLOCKED");
-      }
-
-      const requests = await api.requests.getAll();
-      const newRequest: SalesRequest = {
-        ...request,
-        id: `req-${Date.now()}`,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
+      const payload = {
+        agent_id: request.agentId,
+        agent_name: request.agentName,
+        institution_name: request.institutionName,
+        system_id: request.systemId,
+        system_name: request.systemName,
+        subscription_type: request.subscriptionType,
+        location: request.location,
+        contact_name: request.contactName,
+        contact_phone: request.contactPhone,
+        status: request.status,
+        admin_note: request.adminNote
       };
-      const updated = [newRequest, ...requests];
-      localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(updated));
-      return newRequest;
+
+      const { data, error } = await supabase
+        .from('requests')
+        .insert([payload])
+        .select()
+        .single();
+
+      if (error) throw error;
+      return data as SalesRequest;
     },
     updateStatus: async (id: string, status: RequestStatus, note?: string): Promise<void> => {
-      const requests = await api.requests.getAll();
-      const requestIndex = requests.findIndex(r => r.id === id);
-      if (requestIndex === -1) return;
+      const { data: request, error: fetchError } = await supabase
+        .from('requests')
+        .select('*')
+        .eq('id', id)
+        .single();
 
-      const request = requests[requestIndex];
-      request.status = status;
-      request.rejectionReason = note;
-      request.updatedAt = new Date().toISOString();
+      if (fetchError) throw fetchError;
 
-      localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+      const { error } = await supabase
+        .from('requests')
+        .update({ 
+          status, 
+          rejection_reason: note, 
+          updated_at: new Date().toISOString() 
+        })
+        .eq('id', id);
 
-      // تحديث حالة المؤسسة تلقائياً عند قبول الطلب
+      if (error) throw error;
+
       if (status === RequestStatus.ACCEPTED) {
-        await api.institutions.syncFromRequest(request);
+        await api.institutions.syncFromRequest({
+          institutionName: request.institution_name,
+          agentName: request.agent_name,
+          location: request.location,
+          status: status
+        });
       }
 
-      const notificationTitle = status === RequestStatus.ACCEPTED ? 'تم قبول طلبك' : 'تم رفض طلبك';
-      const notificationMessage = status === RequestStatus.ACCEPTED 
-        ? `تم قبول طلبك الخاص بـ ${request.institutionName} بنجاح.`
-        : `عذراً، تم رفض طلبك الخاص بـ ${request.institutionName}. السبب: ${note || 'غير محدد'}`;
-      
-      const newNotif: Notification = {
-        id: `notif-${Date.now()}`,
-        userId: request.agentId,
-        title: notificationTitle,
-        message: notificationMessage,
-        type: status === RequestStatus.ACCEPTED ? 'SUCCESS' : 'DANGER',
-        isRead: false,
-        createdAt: new Date().toISOString()
-      };
-
-      const notifications: Notification[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS) || '[]');
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify([newNotif, ...notifications]));
+      await supabase.from('notifications').insert([{
+        user_id: request.agent_id,
+        title: status === RequestStatus.ACCEPTED ? 'تم قبول طلبك ✅' : 'عذراً، تم رفض الطلب ❌',
+        message: status === RequestStatus.ACCEPTED 
+          ? `تمت الموافقة على طلبك لـ ${request.institution_name}. تم تحديث رصيد عمولاتك.`
+          : `تم رفض الطلب المقدم لـ ${request.institution_name}. السبب: ${note || 'غير موضح'}`,
+        type: status === RequestStatus.ACCEPTED ? 'SUCCESS' : 'DANGER'
+      }]);
     }
   },
 
   notifications: {
     getAll: async (userId: string): Promise<Notification[]> => {
-      const all: Notification[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS) || '[]');
-      return all.filter(n => n.userId === userId);
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+      
+      if (error) return [];
+      return data.map(n => ({
+        ...n,
+        userId: n.user_id,
+        isRead: n.is_read,
+        createdAt: n.created_at
+      })) as Notification[];
     },
     markAsRead: async (id: string): Promise<void> => {
-      const all: Notification[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS) || '[]');
-      const updated = all.map(n => n.id === id ? { ...n, isRead: true } : n);
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(updated));
+      await supabase.from('notifications').update({ is_read: true }).eq('id', id);
     },
     markAllAsRead: async (userId: string): Promise<void> => {
-      const all: Notification[] = JSON.parse(localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS) || '[]');
-      const updated = all.map(n => n.userId === userId ? { ...n, isRead: true } : n);
-      localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(updated));
+      await supabase.from('notifications').update({ is_read: true }).eq('user_id', userId);
     }
   },
 
   agents: {
     getAll: async (): Promise<User[]> => {
-      return JSON.parse(localStorage.getItem(STORAGE_KEYS.AGENTS) || '[]');
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('role', UserRole.AGENT);
+      return (data || []) as User[];
     },
     getById: async (id: string): Promise<User | null> => {
-      const agents = await api.agents.getAll();
-      return agents.find(a => a.id === id) || null;
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', id)
+        .single();
+      return (data || null) as User;
     },
     create: async (agent: Omit<User, 'id' | 'status' | 'role'>): Promise<User> => {
-      const agents = await api.agents.getAll();
-      const newAgent: User = {
-        ...agent,
-        id: `agent-${Date.now()}`,
-        status: 'ACTIVE',
-        role: UserRole.AGENT
+      const payload = {
+        name: agent.name,
+        username: agent.username,
+        password: agent.password,
+        email: agent.email || '',
+        city: agent.city || '',
+        phone: agent.phone || '',
+        role: UserRole.AGENT,
+        status: 'ACTIVE'
       };
-      localStorage.setItem(STORAGE_KEYS.AGENTS, JSON.stringify([newAgent, ...agents]));
-      return newAgent;
+
+      const { data, error } = await supabase
+        .from('users')
+        .insert([payload])
+        .select()
+        .single();
+        
+      if (error) {
+        console.error("Supabase Create Agent Error:", error);
+        throw error;
+      }
+      return data as User;
     },
     update: async (id: string, updates: Partial<User>): Promise<void> => {
-      const agents = await api.agents.getAll();
-      const updated = agents.map(a => a.id === id ? { ...a, ...updates } : a);
-      localStorage.setItem(STORAGE_KEYS.AGENTS, JSON.stringify(updated));
+      const { error } = await supabase.from('users').update(updates).eq('id', id);
+      if (error) throw error;
     },
     toggleStatus: async (id: string): Promise<void> => {
-      const agents = await api.agents.getAll();
-      const updated = agents.map(a => a.id === id ? { 
-        ...a, 
-        status: a.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE' 
-      } : a);
-      localStorage.setItem(STORAGE_KEYS.AGENTS, JSON.stringify(updated));
+      const { data } = await supabase.from('users').select('status').eq('id', id).single();
+      const newStatus = data?.status === 'ACTIVE' ? 'SUSPENDED' : 'ACTIVE';
+      const { error } = await supabase.from('users').update({ status: newStatus }).eq('id', id);
+      if (error) throw error;
     }
   },
 
   admins: {
     getAll: async (): Promise<User[]> => {
-      return JSON.parse(localStorage.getItem(STORAGE_KEYS.ADMINS) || '[]');
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .in('role', [UserRole.ADMIN, UserRole.SUPERVISOR]);
+      return (data || []) as User[];
     },
     create: async (admin: Omit<User, 'id' | 'status' | 'role'>): Promise<User> => {
-      const admins = await api.admins.getAll();
-      const newAdmin: User = {
-        ...admin,
-        id: `admin-${Date.now()}`,
-        status: 'ACTIVE',
-        role: UserRole.ADMIN
+      const payload = {
+        name: admin.name,
+        username: admin.username,
+        password: admin.password,
+        email: admin.email || '',
+        role: UserRole.SUPERVISOR,
+        status: 'ACTIVE'
       };
-      localStorage.setItem(STORAGE_KEYS.ADMINS, JSON.stringify([newAdmin, ...admins]));
-      return newAdmin;
+
+      const { data, error } = await supabase
+        .from('users')
+        .insert([payload])
+        .select()
+        .single();
+        
+      if (error) throw error;
+      return data as User;
     },
     update: async (id: string, updates: Partial<User>): Promise<void> => {
-      const admins = await api.admins.getAll();
-      const updated = admins.map(a => a.id === id ? { ...a, ...updates } : a);
-      localStorage.setItem(STORAGE_KEYS.ADMINS, JSON.stringify(updated));
+      const { error } = await supabase.from('users').update(updates).eq('id', id);
+      if (error) throw error;
     }
   },
 
   institutions: {
     getAll: async (): Promise<Institution[]> => {
-      const data = localStorage.getItem(STORAGE_KEYS.INSTITUTIONS);
-      return data ? JSON.parse(data) : [];
+      const { data, error } = await supabase
+        .from('institutions')
+        .select('*')
+        .order('last_visit_date', { ascending: false });
+      
+      if (error) return [];
+      return data.map(i => ({
+        ...i,
+        lastVisitedBy: i.last_visited_by,
+        lastVisitDate: i.last_visit_date
+      })) as Institution[];
     },
     create: async (data: Omit<Institution, 'id' | 'status' | 'lastVisitDate'>): Promise<Institution> => {
-      const institutions = await api.institutions.getAll();
-      const newInst: Institution = {
-        ...data,
-        id: `inst-${Date.now()}`,
-        status: 'INTERESTED',
-        lastVisitDate: new Date().toISOString().split('T')[0]
+      const payload = {
+        name: data.name,
+        city: data.city,
+        address: data.address,
+        last_visited_by: data.lastVisitedBy,
+        last_visit_date: new Date().toISOString().split('T')[0],
+        status: 'INTERESTED'
       };
-      const updated = [newInst, ...institutions];
-      localStorage.setItem(STORAGE_KEYS.INSTITUTIONS, JSON.stringify(updated));
-      return newInst;
+
+      const { data: result, error } = await supabase
+        .from('institutions')
+        .insert([payload])
+        .select()
+        .single();
+
+      if (error) throw error;
+      return result as Institution;
     },
     delete: async (id: string): Promise<void> => {
-      const institutions = await api.institutions.getAll();
-      const updated = institutions.filter(inst => String(inst.id) !== String(id));
-      localStorage.setItem(STORAGE_KEYS.INSTITUTIONS, JSON.stringify(updated));
+      await supabase.from('institutions').delete().eq('id', id);
     },
-    syncFromRequest: async (request: SalesRequest): Promise<void> => {
-      const institutions = await api.institutions.getAll();
-      const existingIndex = institutions.findIndex(inst => inst.name === request.institutionName);
-      
-      const status: Institution['status'] = request.status === RequestStatus.ACCEPTED ? 'CUSTOMER' : 'INTERESTED';
-      
-      if (existingIndex >= 0) {
-        institutions[existingIndex] = {
-          ...institutions[existingIndex],
-          lastVisitedBy: request.agentName,
-          lastVisitDate: new Date().toISOString().split('T')[0],
-          status: status
-        };
+    syncFromRequest: async (request: any): Promise<void> => {
+      const { data: existing } = await supabase
+        .from('institutions')
+        .select('id')
+        .eq('name', request.institutionName)
+        .maybeSingle();
+
+      const payload = {
+        name: request.institutionName,
+        city: request.location?.split('-')[0]?.trim() || 'غير محدد',
+        address: request.location || '',
+        last_visited_by: request.agentName,
+        last_visit_date: new Date().toISOString().split('T')[0],
+        status: request.status === RequestStatus.ACCEPTED ? 'CUSTOMER' : 'INTERESTED'
+      };
+
+      if (existing) {
+        await supabase.from('institutions').update(payload).eq('id', existing.id);
       } else {
-        const newInst: Institution = {
-          id: `inst-${Date.now()}`,
-          name: request.institutionName,
-          city: request.location.split('-')[0]?.trim() || 'غير محدد',
-          address: request.location,
-          lastVisitedBy: request.agentName,
-          lastVisitDate: new Date().toISOString().split('T')[0],
-          status: status
-        };
-        institutions.push(newInst);
+        await supabase.from('institutions').insert([payload]);
       }
-      localStorage.setItem(STORAGE_KEYS.INSTITUTIONS, JSON.stringify(institutions));
     }
   },
 
   systems: {
     getAll: async (): Promise<SystemProduct[]> => {
-      const data = localStorage.getItem(STORAGE_KEYS.SYSTEMS);
-      return data ? JSON.parse(data) : [];
+      const { data, error } = await supabase.from('systems').select('*');
+      return (data || []) as SystemProduct[];
     },
     create: async (system: Omit<SystemProduct, 'id'>): Promise<SystemProduct> => {
-      const systems = await api.systems.getAll();
-      const newSystem: SystemProduct = {
-        ...system,
-        id: `sys-${Date.now()}`
-      };
-      localStorage.setItem(STORAGE_KEYS.SYSTEMS, JSON.stringify([...systems, newSystem]));
-      return newSystem;
+      const { data, error } = await supabase.from('systems').insert([system]).select().single();
+      if (error) throw error;
+      return data as SystemProduct;
     },
     update: async (id: string, system: Partial<SystemProduct>): Promise<void> => {
-      const systems = await api.systems.getAll();
-      const updated = systems.map(s => s.id === id ? { ...s, ...system } : s);
-      localStorage.setItem(STORAGE_KEYS.SYSTEMS, JSON.stringify(updated));
+      await supabase.from('systems').update(system).eq('id', id);
     },
     delete: async (id: string): Promise<void> => {
-      const systems = await api.systems.getAll();
-      const updated = systems.filter(s => s.id !== id);
-      localStorage.setItem(STORAGE_KEYS.SYSTEMS, JSON.stringify(updated));
+      await supabase.from('systems').delete().eq('id', id);
     }
+  },
+
+  data: {
+    exportAll: () => alert("البيانات مخزنة سحابياً الآن في Supabase وتتم حمايتها تلقائياً."),
+    importAll: async (file: File) => alert("البيانات مخزنة سحابياً. لإجراء استيراد ضخم يرجى استخدام لوحة تحكم Supabase.")
   },
 
   ai: {
@@ -301,10 +350,10 @@ export const api = {
       const summary = requests.map(r => `${r.agentName}: ${r.status}`).join(', ');
       const response = await ai.models.generateContent({
         model: 'gemini-3-flash-preview',
-        contents: `حلل بيانات المبيعات التالية باللغة العربية: ${summary}`,
-        config: { systemInstruction: "أنت خبير مبيعات تحلل أداء الفريق الميداني." }
+        contents: `حلل بيانات المبيعات التالية باللغة العربية واقترح خطة عمل لتحسين أداء الفريق: ${summary}`,
+        config: { systemInstruction: "أنت خبير مبيعات تحلل أداء الفريق الميداني لشركة برمجيات متخصصة في الأنظمة التعليمية." }
       });
-      return response.text || "تعذر التحليل.";
+      return response.text || "تعذر التحليل حالياً، يرجى المحاولة لاحقاً.";
     }
   }
 };
